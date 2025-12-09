@@ -43,24 +43,30 @@ const handleToggleSelection = () => {
 
 <template>
   <div class="todo-item" :class="{ completed: todo.completed, selected: isSelected }">
-    <!-- 【新增功能：选中复选框】 -->
-    <input 
-      type="checkbox" 
-      class="select-checkbox"
+    <!-- 【新增功能：选中复选框】使用Element Plus的Checkbox组件 -->
+    <el-checkbox 
       :checked="isSelected" 
       @change="handleToggleSelection"
+      style="margin-right: 10px;"
     />
     
-    <!-- 完成状态复选框 -->
-    <input 
-      type="checkbox" 
-      class="complete-checkbox"
+    <!-- 完成状态复选框 使用Element Plus的Checkbox组件 -->
+    <el-checkbox 
       :checked="todo.completed" 
       @change="handleToggle"
+      style="margin-right: 10px;"
     />
     
     <span class="todo-text">{{ todo.text }}</span>
-    <button class="delete-btn" @click="handleDelete">删除</button>
+    <!-- 使用Element Plus的Button组件 -->
+    <el-button 
+      type="danger" 
+      size="small" 
+      @click="handleDelete"
+      style="margin-left: auto;"
+    >
+      删除
+    </el-button>
   </div>
 </template>
 
@@ -68,43 +74,45 @@ const handleToggleSelection = () => {
 .todo-item {
   display: flex;
   align-items: center;
-  padding: 10px;
-  border-bottom: 1px solid #eee;
-  transition: background-color 0.3s;
+  padding: 14px 20px;
+  border-bottom: 1px solid #f0f0f0;
+  transition: all 0.3s ease;
+  background-color: #fff;
 }
 
 /* 【新增样式：选中状态】 */
 .todo-item.selected {
-  background-color: #e8f5e8;
+  background-color: #f0f9eb;
+  border-left: 4px solid #67c23a;
+}
+
+.todo-item:last-child {
+  border-bottom: none;
+}
+
+.todo-item:hover {
+  background-color: #fafafa;
 }
 
 .todo-item.completed .todo-text {
   text-decoration: line-through;
-  color: #999;
-}
-
-/* 【新增样式：复选框间距】 */
-.select-checkbox, .complete-checkbox {
-  margin-right: 10px;
-  cursor: pointer;
+  color: #909399;
 }
 
 .todo-text {
   flex: 1;
-  margin: 0 10px;
+  margin: 0 15px;
+  font-size: 15px;
+  color: #303133;
+  line-height: 1.5;
 }
 
-.delete-btn {
-  padding: 5px 10px;
-  background-color: #ff4444;
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background-color 0.3s;
+/* Element Plus 组件样式覆盖 */
+:deep(.el-checkbox) {
+  font-size: 16px;
 }
 
-.delete-btn:hover {
-  background-color: #cc0000;
+:deep(.el-button) {
+  margin-left: auto;
 }
 </style>
