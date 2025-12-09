@@ -32,7 +32,7 @@ const scrollToBottom = () => {
 }
 
 // 发送消息
-const sendMessage = () => {
+const sendMessage = async () => {
   if (!inputMessage.value.trim() || isGenerating.value) {
     return
   }
@@ -52,18 +52,85 @@ const sendMessage = () => {
   // 开始生成回复
   isGenerating.value = true
 
-  // 模拟AI回复生成
-  setTimeout(() => {
-    const reply = {
+  try {
+    // 转换消息格式为OpenAI API所需的格式
+    const apiMessages = messages.value.map(msg => ({
+      role: msg.role,
+      content: msg.content
+    }))
+
+    // 调用后端API
+    const response = await fetch('http://localhost:3000/api/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ 
+        messages: apiMessages
+      })
+    })
+
+    if (!response.ok) {
+      throw new Error('API请求失败')
+    }
+
+    // 处理流式响应
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let aiReply = {
       id: Date.now() + 1,
       role: 'assistant',
-      content: '这是AI生成的回复：' + userMessage.content,
+      content: '',
       timestamp: new Date().toLocaleString()
     }
-    messages.value.push(reply)
+    messages.value.push(aiReply)
+    
+    // 隐藏正在输入指示器
+    isGenerating.value = false
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      const chunk = decoder.decode(value, { stream: true })
+      const lines = chunk.split('\n')
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6).trim()
+          if (data === '[DONE]') break
+
+          try {
+            const json = JSON.parse(data)
+            if (json.error) {
+              throw new Error(json.error)
+            }
+            if (json.choices && json.choices.length > 0) {
+              const delta = json.choices[0].delta
+              const content = delta?.content || ''
+              if (content) {
+                // 更新AI回复内容
+                aiReply.content += content
+                // 强制更新视图
+                messages.value = [...messages.value]
+                scrollToBottom()
+              }
+            }
+          } catch (jsonError) {
+            console.error('解析JSON错误:', jsonError)
+            // 发送错误通知
+            ElMessage.error(`流式响应解析错误: ${jsonError.message}`)
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error:', error)
+    ElMessage.error('获取AI回复失败，请稍后重试')
+  } finally {
     isGenerating.value = false
     scrollToBottom()
-  }, 1500)
+  }
 }
 
 // 组件挂载后滚动到底部
@@ -86,8 +153,22 @@ onMounted(() => {
       >
         <div class="message-content">{{ message.content }}</div>
       </div>
+      
+      <!-- 正在输入指示器 -->
+      <div v-if="isGenerating" class="message-item ai-message">
+        <div class="message-content generating">
+          <div class="typing-indicator">
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+          </div>
+          <span class="typing-text">正在思考...</span>
+        </div>
+      </div>
     </div>
 
+
+    
     <!-- 输入区域 -->
     <div class="input-area">
       <el-input
@@ -104,6 +185,7 @@ onMounted(() => {
         @click="sendMessage"
         :disabled="isGenerating || !inputMessage.trim()"
         :icon="isGenerating ? Refresh : ChatDotRound"
+        :loading="isGenerating"
       >
         {{ isGenerating ? '生成中...' : '发送' }}
       </el-button>
@@ -145,6 +227,51 @@ onMounted(() => {
   }
 }
 
+/* 正在输入指示器样式 */
+.generating {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.typing-indicator {
+  display: flex;
+  gap: 4px;
+  padding-top: 2px;
+}
+
+.typing-dot {
+  width: 8px;
+  height: 8px;
+  background-color: #0284c7;
+  border-radius: 50%;
+  animation: typing 1.4s infinite ease-in-out;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+.typing-text {
+  color: #666;
+  font-style: italic;
+}
+
+@keyframes typing {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.5;
+  }
+  30% {
+    transform: translateY(-10px);
+    opacity: 1;
+  }
+}
+
 .ai-message {
   justify-content: flex-start;
 }
@@ -173,6 +300,8 @@ onMounted(() => {
   color: white;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
 }
+
+
 
 .input-area {
   padding: 20px;
