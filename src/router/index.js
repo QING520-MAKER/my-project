@@ -6,11 +6,18 @@ import HomeView from '../views/HomeView.vue'
 import TodoView from '../views/TodoView.vue'
 import AboutView from '../views/AboutView.vue'
 import AIVIew from '../views/AIVIew.vue'
+import LoginView from '../views/LoginView.vue'
 
 // 定义路由配置
 const routes = [
   {
     path: '/',
+    name: 'login',
+    component: LoginView,
+    meta: { hideLayout: true }
+  },
+  {
+    path: '/home',
     name: 'home',
     component: HomeView
   },
