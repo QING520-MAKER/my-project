@@ -1,143 +1,146 @@
 const http = require('http');
-const https = require('https');
+const WebSocket = require('ws');
+const CryptoJS = require('crypto-js');
 const dotenv = require('dotenv');
 
 // 加载环境变量
 dotenv.config();
 
-const API_KEY = process.env.XUNFEI_API_KEY;
+const APPID = process.env.SPARK_APPID;
+const API_SECRET = process.env.SPARK_API_SECRET;
+const API_KEY = process.env.SPARK_API_KEY;
 const PORT = process.env.PORT || 3000;
 
-// 创建与简化版服务器完全相同的HTTP服务器
+// 星火API配置 (与前端原有配置保持一致)
+// 如果你的Key是针对其他版本的（如v2.1, v3.1），请相应修改URL和Domain
+const SPARK_URL = 'wss://sparkcube-api.xf-yun.com/v1/customize'; 
+const SPARK_DOMAIN = 'general';
+
+// 生成鉴权URL
+function getAuthUrl() {
+  const urlObj = new URL(SPARK_URL);
+  const host = urlObj.host;
+  const path = urlObj.pathname;
+  const date = new Date().toUTCString();
+  
+  const builder = `host: ${host}\ndate: ${date}\nGET ${path} HTTP/1.1`;
+  
+  const signatureOrigin = builder;
+  const signatureSha = CryptoJS.HmacSHA256(signatureOrigin, API_SECRET);
+  const signature = CryptoJS.enc.Base64.stringify(signatureSha);
+  
+  const authorizationOrigin = `api_key="${API_KEY}", algorithm="hmac-sha256", headers="host date request-line", signature="${signature}"`;
+  const authorization = CryptoJS.enc.Base64.stringify(CryptoJS.enc.Utf8.parse(authorizationOrigin));
+  
+  return `${SPARK_URL}?authorization=${authorization}&date=${encodeURI(date)}&host=${host}`;
+}
+
 const server = http.createServer((req, res) => {
   // 设置CORS头
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   
-  // 处理OPTIONS请求
   if (req.method === 'OPTIONS') {
     res.statusCode = 200;
     res.end();
     return;
   }
   
-  // 只处理POST请求到/api/chat
   if (req.method === 'POST' && req.url === '/api/chat') {
     let body = '';
-    
-    // 接收请求体
-    req.on('data', (chunk) => {
-      body += chunk;
-    });
-    
+    req.on('data', chunk => body += chunk);
     req.on('end', () => {
       try {
-        const requestData = JSON.parse(body);
-        const { messages } = requestData;
-        
-        console.log('=== 收到请求 ===');
-        console.log('消息:', messages);
-        
-        // 所有请求都使用流式处理
-        handleStreamRequest(messages, res);
-      } catch (error) {
-        console.error('解析请求体错误:', error);
+        if (!body) {
+           throw new Error('Empty request body');
+        }
+        const { messages } = JSON.parse(body);
+        if (!APPID || !API_SECRET || !API_KEY) {
+          console.error('Missing API Credentials');
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: 'Server configuration error: Missing API Key' }));
+          return;
+        }
+        handleChatRequest(messages, res);
+      } catch (e) {
+        console.error('Request parsing error:', e);
         res.statusCode = 400;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: '请求格式错误' }));
+        res.end(JSON.stringify({ error: 'Invalid JSON or Empty Body' }));
       }
     });
-  } else if (req.method === 'GET' && req.url === '/health') {
-    // 健康检查端点
-    res.statusCode = 200;
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ status: 'ok', message: 'AI Chat API is running' }));
   } else {
     res.statusCode = 404;
-    res.end();
+    res.end('Not Found');
   }
 });
 
-// 处理流式请求
-function handleStreamRequest(messages, res) {
-  // 创建与简化版服务器完全相同的请求体
-  const requestBody = {
-    model: 'xop3qwen1b7',
-    messages: messages,
-    max_tokens: 4000,
-    temperature: 0.7,
-    stream: true
-  };
-  
-  // 创建与简化版服务器完全相同的请求选项
-  const options = {
-    hostname: 'maas-api.cn-huabei-1.xf-yun.com',
-    port: 443,
-    path: '/v1/chat/completions',
-    method: 'POST',
-    timeout: 30000,
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${API_KEY}`,
-      'User-Agent': 'Node.js-Client',
-      'Accept': '*/*'
+function handleChatRequest(messages, res) {
+  // 设置SSE响应头
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  console.log('Connecting to Spark API...');
+  const url = getAuthUrl();
+  const ws = new WebSocket(url);
+
+  ws.on('open', () => {
+    console.log('Connected to Spark API');
+    const payload = {
+      header: {
+        app_id: APPID,
+        uid: "user_default"
+      },
+      parameter: {
+        chat: {
+          domain: SPARK_DOMAIN,
+          temperature: 0.5,
+          max_tokens: 2048
+        }
+      },
+      payload: {
+        message: {
+          text: messages
+        }
+      }
+    };
+    ws.send(JSON.stringify(payload));
+  });
+
+  ws.on('message', (data) => {
+    const response = JSON.parse(data);
+    if (response.header.code !== 0) {
+      console.error('Spark API Error:', response.header.message);
+      res.write(`data: ${JSON.stringify({ error: response.header.message })}\n\n`);
+      // 不立即关闭，让前端有机会处理错误
+      return;
     }
-  };
-  
-  console.log('发送到MaaS的请求体:', JSON.stringify(requestBody, null, 2));
-  console.log('请求选项:', JSON.stringify(options, null, 2));
-  
-  // 创建请求（与简化版服务器完全相同的方式）
-  const maasReq = https.request(options, (maasRes) => {
-    console.log('\n=== MaaS API 响应 ===');
-    console.log('状态码:', maasRes.statusCode);
-    console.log('响应头:', maasRes.headers);
-    
-    // 设置SSE响应头
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-    
-    // 直接将MaaS响应的数据发送给客户端
-    maasRes.pipe(res);
-    
-    // 响应结束时记录日志
-    maasRes.on('end', () => {
-      console.log('\n=== 响应结束 ===');
-      // 不再手动发送[DONE]，因为pipe()已经关闭了连接
-    });
+
+    if (response.payload && response.payload.choices && response.payload.choices.text) {
+      const text = response.payload.choices.text[0].content;
+      res.write(`data: ${JSON.stringify({ content: text })}\n\n`);
+    }
+
+    if (response.header.status === 2) {
+      res.write('data: [DONE]\n\n');
+      res.end();
+      ws.close();
+    }
   });
-  
-  // 错误处理
-  maasReq.on('error', (error) => {
-    console.error('\n=== 请求错误 ===');
-    console.error('错误:', error);
-    
-    res.write(`data: {"error": "流式请求失败：${error.message}"} \n\n`);
-    res.write('data: [DONE]\n\n');
+
+  ws.on('error', (error) => {
+    console.error('WebSocket Error:', error);
+    res.write(`data: ${JSON.stringify({ error: 'Spark API Connection Error' })}\n\n`);
     res.end();
   });
-  
-  // 超时处理
-  maasReq.on('timeout', () => {
-    console.error('\n=== 请求超时 ===');
-    maasReq.destroy();
-    
-    res.write(`data: {"error": "请求超时"} \n\n`);
-    res.write('data: [DONE]\n\n');
+
+  ws.on('close', (code, reason) => {
+    console.log(`WebSocket closed: ${code} ${reason}`);
     res.end();
   });
-  
-  // 发送请求体
-  maasReq.write(JSON.stringify(requestBody));
-  maasReq.end();
-  
-  console.log('\n=== 请求已发送 ===');
 }
 
-// 启动服务器
 server.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
+  console.log(`Server running at http://localhost:${PORT}`);
 });

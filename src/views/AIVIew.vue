@@ -1,49 +1,55 @@
+<script>
+export default {
+  name: 'AIView'
+}
+</script>
+
 <script setup>
-import { ref, onMounted, nextTick, onUnmounted } from 'vue'
-import { ChatDotRound, Refresh, Microphone, Mute } from '@element-plus/icons-vue'
+import { ref, onMounted, nextTick, onUnmounted, computed } from 'vue'
+import { Refresh, Microphone, Mute, Promotion } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { SparkWebsocket } from '../utils/spark'
 import { AudioRecorder } from '../utils/audio-recorder'
 import { IatWebsocket } from '../utils/iat'
+import logoImg from '../assets/logo.png'
 
-// 配置信息 - 请在此处填入您的API信息
-const SPARK_CONFIG = {
+// 语音听写配置
+const IAT_CONFIG = {
   appId: '8d81f5ce',
   apiSecret: 'OGJkZDJhMWQ5ZWE1YzRkYjFkZTg1ZWI0',
-  apiKey: '3ae52f7a84e315722cc9ca015d40bb36',
-  url: 'wss://sparkcube-api.xf-yun.com/v1/customize'
+  apiKey: '3ae52f7a84e315722cc9ca015d40bb36'
 }
 
-// 语音听写配置 (使用相同的凭证)
-const IAT_CONFIG = {
-  appId: SPARK_CONFIG.appId,
-  apiSecret: SPARK_CONFIG.apiSecret,
-  apiKey: SPARK_CONFIG.apiKey
-}
-
-// 对话消息列表
-const messages = ref([
-  {
-    id: 1,
-    role: 'assistant',
-    content: '你好！我是你的AI助手，有什么可以帮助你的吗？',
-    timestamp: new Date().toLocaleString()
-  }
-])
-
-// 输入框内容
+// 状态定义
+const messages = ref([])
 const inputMessage = ref('')
-// 对话区域引用
 const chatContainer = ref(null)
-// 是否正在生成回复
 const isGenerating = ref(false)
-// Spark WebSocket 实例
-let sparkWs = null
-
-// 语音相关状态
 const isRecording = ref(false)
 const recorder = ref(null)
 const iatWs = ref(null)
+let abortController = null
+
+// 是否显示欢迎页（无消息时显示）
+const showWelcome = computed(() => messages.value.length === 0)
+
+// 监听全局新建对话事件（来自Sidebar）
+onMounted(() => {
+  window.addEventListener('trigger-new-chat', startNewChat)
+  scrollToBottom()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('trigger-new-chat', startNewChat)
+  if (abortController) abortController.abort()
+  stopRecording()
+})
+
+// 开启新对话
+const startNewChat = () => {
+  if (isGenerating.value) return
+  messages.value = [] // 清空消息，触发显示Welcome页
+  ElMessage.success('已开启新对话')
+}
 
 // 滚动到底部
 const scrollToBottom = () => {
@@ -56,28 +62,19 @@ const scrollToBottom = () => {
 
 // 发送消息
 const sendMessage = async () => {
-  if (!inputMessage.value.trim() || isGenerating.value) {
-    return
-  }
-
-  // 检查配置是否已填写
-  if (SPARK_CONFIG.appId === 'YOUR_APP_ID') {
-    ElMessage.warning('请先在代码中配置 APPID, APISecret 和 APIKey')
-    return
-  }
+  if (!inputMessage.value.trim() || isGenerating.value) return
 
   const content = inputMessage.value.trim()
   inputMessage.value = ''
   isGenerating.value = true
 
   // 添加用户消息
-  const userMessage = {
+  messages.value.push({
     id: Date.now(),
     role: 'user',
     content: content,
     timestamp: new Date().toLocaleString()
-  }
-  messages.value.push(userMessage)
+  })
   scrollToBottom()
 
   // 准备AI回复占位
@@ -89,71 +86,69 @@ const sendMessage = async () => {
   }
   messages.value.push(aiReply)
 
-  // 初始化并连接WebSocket
-  sparkWs = new SparkWebsocket(SPARK_CONFIG)
+  // 准备发送给后端的上下文
+  const context = messages.value
+    .slice(0, -1)
+    .filter(msg => msg.role === 'user' || msg.role === 'assistant')
+    .map(msg => ({ role: msg.role, content: msg.content }))
 
-  sparkWs.onOpen = () => {
-    // 构建历史消息上下文 (Spark API 格式)
-    const context = messages.value
-      .slice(0, -1) // 排除掉刚刚添加的空回复
-      .filter(msg => msg.role === 'user' || msg.role === 'assistant')
-      .map(msg => ({
-        role: msg.role,
-        content: msg.content
-      }))
+  try {
+    abortController = new AbortController()
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: context }),
+      signal: abortController.signal
+    })
 
-    sparkWs.send(context)
-  }
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`)
 
-  sparkWs.onMessage = (response) => {
-    // 处理响应
-    if (response.header.code !== 0) {
-      ElMessage.error(`API Error: ${response.header.message}`)
-      isGenerating.value = false
-      sparkWs.close()
-      return
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      const chunk = decoder.decode(value)
+      const lines = chunk.split('\n')
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const dataStr = line.slice(6).trim()
+          if (dataStr === '[DONE]') {
+            isGenerating.value = false
+            return
+          }
+          try {
+            const data = JSON.parse(dataStr)
+            if (data.content) {
+              aiReply.content += data.content
+              messages.value = [...messages.value]
+              scrollToBottom()
+            }
+          } catch (e) {
+            console.error('Error parsing SSE data:', e)
+          }
+        }
+      }
     }
-
-    if (response.payload && response.payload.choices && response.payload.choices.text) {
-      const text = response.payload.choices.text[0].content
-      aiReply.content += text
-
-      // 强制更新视图
-      messages.value = [...messages.value]
-      scrollToBottom()
+  } catch (error) {
+    if (error.name !== 'AbortError') {
+      console.error('Fetch Error:', error)
+      ElMessage.error('连接发生错误')
+      aiReply.content += '\n[连接发生错误]'
     }
-
-    // 检查是否结束
-    if (response.header.status === 2) {
-      isGenerating.value = false
-      sparkWs.close()
-    }
-  }
-
-  sparkWs.onError = (error) => {
-    console.error('WebSocket Error:', error)
-    ElMessage.error('连接发生错误，请检查网络或配置')
+  } finally {
     isGenerating.value = false
-    aiReply.content += '\n[连接发生错误]'
+    abortController = null
   }
-
-  sparkWs.onClose = () => {
-    if (isGenerating.value) {
-      // 异常关闭
-      isGenerating.value = false
-    }
-  }
-
-  sparkWs.connect()
 }
 
-// 开始/停止录音
+// 录音功能
 const toggleRecording = async () => {
-  if (isRecording.value) {
-    stopRecording()
-  } else {
-    startRecording()
-  }
+  if (isRecording.value) stopRecording()
+  else startRecording()
 }
 
 const startRecording = async () => {
@@ -161,227 +156,278 @@ const startRecording = async () => {
     isRecording.value = true
     recorder.value = new AudioRecorder()
     iatWs.value = new IatWebsocket(IAT_CONFIG)
-
-    // 连接 WebSocket
     iatWs.value.connect()
 
     let isFirstFrame = true
-
-    // 设置回调
-    iatWs.value.onTextChange = (text, isLast) => {
-      // 将识别结果追加到输入框
+    iatWs.value.onTextChange = (text) => {
       inputMessage.value += text
-      if (isLast) {
-        // 自动发送（可选，这里只填充不自动发送）
-        // sendMessage()
-      }
     }
 
-    iatWs.value.onError = (err) => {
-      console.error('IAT Error:', err)
-      ElMessage.error('语音识别出错')
-      stopRecording()
-    }
-
-    // 启动录音
     await recorder.value.start()
-
     recorder.value.onDataAvailable = (buffer) => {
-      if (iatWs.value && iatWs.value.socket && iatWs.value.socket.readyState === WebSocket.OPEN) {
-        const status = isFirstFrame ? 0 : 1
-        iatWs.value.sendAudio(buffer, status)
+      if (iatWs.value?.socket?.readyState === WebSocket.OPEN) {
+        iatWs.value.sendAudio(buffer, isFirstFrame ? 0 : 1)
         isFirstFrame = false
       }
     }
-
-    ElMessage.success('开始录音，请说话...')
+    ElMessage.success('开始录音...')
   } catch (e) {
-    console.error('Start recording failed:', e)
-    ElMessage.error('无法启动录音，请检查麦克风权限')
+    console.error(e)
+    ElMessage.error('无法启动录音')
     isRecording.value = false
   }
 }
 
 const stopRecording = () => {
   if (!isRecording.value) return
-
   isRecording.value = false
-
-  // 发送最后一帧（空数据，status=2）
   if (iatWs.value) {
     iatWs.value.sendAudio(new Int16Array(0), 2)
-    // 延迟关闭连接，等待最后的结果
-    setTimeout(() => {
-      if (iatWs.value) iatWs.value.close()
-      iatWs.value = null
-    }, 1000)
+    setTimeout(() => iatWs.value?.close(), 1000)
   }
-
-  if (recorder.value) {
-    recorder.value.stop()
-    recorder.value = null
-  }
+  recorder.value?.stop()
 }
-
-// 组件挂载后滚动到底部
-onMounted(() => {
-  scrollToBottom()
-})
-
-// 组件卸载时断开连接
-onUnmounted(() => {
-  if (sparkWs) {
-    sparkWs.close()
-  }
-  stopRecording()
-})
 </script>
 
 <template>
-  <div class="chat-container">
-    <!-- 聊天区域 -->
-    <div class="chat-messages" ref="chatContainer">
-      <div v-for="(message, index) in messages" :key="index" :class="[
-        'message-item',
-        message.role === 'assistant' ? 'ai-message' : 'user-message'
-      ]">
+  <div class="doubao-container">
+    <!-- 欢迎页 (空状态) -->
+    <div v-if="showWelcome" class="welcome-screen">
+      <h1 class="welcome-title">有什么我能帮你的吗？</h1>
+    </div>
+
+    <!-- 聊天记录区域 -->
+    <div v-else class="chat-flow" ref="chatContainer">
+      <div v-for="(message, index) in messages" :key="index" :class="['message-row', message.role]">
         <!-- 头像 -->
-        <div class="avatar" :class="message.role">
-          {{ message.role === 'assistant' ? 'AI' : 'Me' }}
+        <div class="avatar-col">
+          <div v-if="message.role === 'assistant'" class="ai-avatar">
+            <img :src="logoImg" alt="AI" />
+          </div>
+          <div v-else class="user-avatar">
+            <img src="https://cube.elemecdn.com/0/88/03b0d39583f48206768a7534e55bcpng.png" alt="Me" />
+          </div>
         </div>
 
-        <div class="message-content">
-          {{ message.content }}
-          <span v-if="message.role === 'assistant' && isGenerating && index === messages.length - 1 && !message.content"
-            class="cursor">|</span>
-        </div>
-      </div>
-
-      <!-- 正在输入指示器 (连接建立中) -->
-      <div v-if="isGenerating && messages[messages.length - 1].content === ''" class="message-item ai-message">
-        <div class="avatar assistant">AI</div>
-        <div class="message-content generating">
-          <span class="typing-text">正在思考...</span>
+        <!-- 消息气泡 -->
+        <div class="content-col">
+          <div class="bubble">
+            <div class="markdown-body">{{ message.content }}</div>
+            <span
+              v-if="message.role === 'assistant' && isGenerating && index === messages.length - 1 && !message.content"
+              class="cursor">|</span>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- 输入区域 -->
-    <div class="input-area">
-      <el-input v-model="inputMessage" placeholder="请输入消息..." @keyup.enter="sendMessage" :disabled="isGenerating"
-        type="textarea" :rows="3" resize="none" />
-      <div class="input-actions">
-        <div class="left-actions">
-          <!-- 语音按钮 -->
-          <el-button :type="isRecording ? 'danger' : 'default'" circle :icon="isRecording ? Mute : Microphone"
-            @click="toggleRecording" :title="isRecording ? '停止录音' : '开始录音'" />
-          <span v-if="isRecording" class="recording-tip">正在听...</span>
-          <span v-else class="tip">按 Enter 发送</span>
-        </div>
+    <!-- 底部悬浮输入框 -->
+    <div class="input-wrapper">
+      <div class="input-card">
+        <!-- 输入框 -->
+        <textarea v-model="inputMessage" class="custom-textarea" placeholder="发消息"
+          @keydown.enter.prevent="sendMessage"></textarea>
 
-        <el-button type="primary" @click="sendMessage" :disabled="isGenerating || !inputMessage.trim()"
-          :icon="isGenerating ? Refresh : ChatDotRound" :loading="isGenerating">
-          {{ isGenerating ? '生成中...' : '发送' }}
-        </el-button>
+        <!-- 底部右侧按钮 -->
+        <div class="toolbar-right">
+          <div class="send-actions">
+            <div class="icon-btn voice-btn" :class="{ recording: isRecording }" @click="toggleRecording">
+              <el-icon>
+                <Microphone />
+              </el-icon>
+            </div>
+            <div class="icon-btn send-btn" :class="{ active: inputMessage.trim() }" @click="sendMessage">
+              <el-icon v-if="!isGenerating">
+                <Promotion />
+              </el-icon>
+              <el-icon v-else class="spinning">
+                <Refresh />
+              </el-icon>
+            </div>
+          </div>
+        </div>
       </div>
+      <div class="footer-tip">AI 生成的内容可能不准确，请核对重要信息</div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.chat-container {
+.doubao-container {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background-color: #f5f7fa;
+  position: relative;
+  background-color: #fff;
 }
 
-.chat-messages {
+/* 欢迎页样式 */
+.welcome-screen {
   flex: 1;
-  overflow-y: auto;
-  padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  justify-content: center;
+  align-items: center;
+  padding-bottom: 120px;
+  /* 给底部输入框留空间 */
 }
 
-.message-item {
+.welcome-title {
+  font-size: 28px;
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 40px;
+}
+
+/* 聊天流样式 */
+.chat-flow {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 20px 140px 20px;
+  /* 底部padding避开输入框 */
+  max-width: 900px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.message-row {
   display: flex;
-  gap: 12px;
-  max-width: 80%;
-  animation: fadeIn 0.3s ease-in;
+  gap: 16px;
+  margin-bottom: 24px;
 }
 
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.ai-message {
-  align-self: flex-start;
-}
-
-.user-message {
-  align-self: flex-end;
+.message-row.user {
   flex-direction: row-reverse;
 }
 
-.avatar {
-  width: 36px;
-  height: 36px;
+.avatar-col img {
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: bold;
-  font-size: 14px;
-  flex-shrink: 0;
+  object-fit: cover;
 }
 
-.avatar.assistant {
-  background-color: #0ea5e9;
-  color: white;
+.content-col {
+  max-width: 80%;
 }
 
-.avatar.user {
-  background-color: #f97316;
-  color: white;
-}
-
-.message-content {
+.bubble {
   padding: 12px 16px;
   border-radius: 12px;
   font-size: 15px;
   line-height: 1.6;
-  word-wrap: break-word;
-  white-space: pre-wrap;
+}
+
+.user .bubble {
+  background-color: #e8f3ff;
+  /* 浅蓝底 */
+  color: #1f2937;
+  border-radius: 12px 12px 2px 12px;
+}
+
+.assistant .bubble {
+  background-color: transparent;
+  color: #1f2937;
+  padding-left: 0;
+}
+
+/* 底部输入框样式 */
+.input-wrapper {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 20px;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 1) 20%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 100;
+}
+
+.input-card {
+  width: 100%;
+  max-width: 800px;
+  background: #fff;
+  border-radius: 24px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  border: 1px solid #e5e7eb;
+  padding: 12px 16px;
   position: relative;
+  transition: box-shadow 0.2s;
 }
 
-.ai-message .message-content {
-  background-color: white;
-  border: 1px solid #e2e8f0;
-  border-top-left-radius: 4px;
-  color: #1e293b;
+.input-card:focus-within {
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+  border-color: #d1d5db;
 }
 
-.user-message .message-content {
-  background-color: #0ea5e9;
-  color: white;
-  border-top-right-radius: 4px;
+.custom-textarea {
+  width: 100%;
+  border: none;
+  outline: none;
+  resize: none;
+  height: 50px;
+  font-size: 15px;
+  font-family: inherit;
+  margin: 8px 0;
+  padding: 0;
+}
+
+.toolbar-right {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.send-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
+.icon-btn:hover {
+  background: #e5e7eb;
+}
+
+.send-btn.active {
+  background: #000;
+  color: #fff;
+}
+
+.voice-btn.recording {
+  background: #fee2e2;
+  color: #ef4444;
+  animation: pulse 1.5s infinite;
+}
+
+.footer-tip {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-top: 12px;
 }
 
 .cursor {
   display: inline-block;
   width: 2px;
+  height: 14px;
+  background: #000;
   animation: blink 1s infinite;
+  vertical-align: middle;
 }
 
 @keyframes blink {
@@ -396,58 +442,31 @@ onUnmounted(() => {
   }
 }
 
-.input-area {
-  padding: 20px;
-  background-color: white;
-  border-top: 1px solid #e2e8f0;
-}
-
-.input-actions {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 10px;
-}
-
-.left-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.tip {
-  font-size: 12px;
-  color: #94a3b8;
-}
-
-.recording-tip {
-  font-size: 12px;
-  color: #ef4444;
-  animation: pulse 1.5s infinite;
-}
-
 @keyframes pulse {
   0% {
-    opacity: 1;
+    transform: scale(1);
   }
 
   50% {
-    opacity: 0.5;
+    transform: scale(1.1);
   }
 
   100% {
-    opacity: 1;
+    transform: scale(1);
   }
 }
 
-.input-area :deep(.el-textarea__inner) {
-  border-radius: 8px;
-  border-color: #e2e8f0;
-  padding: 12px;
+.spinning {
+  animation: rotate 1s linear infinite;
 }
 
-.input-area :deep(.el-textarea__inner:focus) {
-  border-color: #0ea5e9;
-  box-shadow: 0 0 0 1px #0ea5e9;
+@keyframes rotate {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>
